@@ -1,0 +1,35 @@
+# Data and artifacts
+data/raw/
+data/processed/
+data/images/_query_cache*.json
+backend/models/*.pkl
+backend/models/*.parquet
+backend/models/*.json
+!backend/models/.gitkeep
+
+# Secrets
+.env
+*.env
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv/
+.ipynb_checkpoints/
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.env.local
+
+# Editor / OS / logs
+.vscode/
+*.log
+.DS_Store
+Thumbs.db
