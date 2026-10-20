@@ -17,6 +17,18 @@ Web demo phân cụm khách hàng (RFM + K-Means) và gợi ý sản phẩm (6 t
 | Docker | – | Tùy chọn, nếu muốn chạy bằng Docker Compose |
 
 Dữ liệu gốc `online_retail_cleaned.csv` cần được đặt vào `data/raw/` (không có sẵn trong repo vì dung lượng lớn).
+## 📥 Dữ liệu đầu vào (Dataset)
+
+Dự án sử dụng bộ dữ liệu **UCI Online Retail II**:
+- **Bản CSV sạch trên Kaggle:** [Online Retail II Dataset - Kaggle](https://www.kaggle.com/datasets/mashlyn/online-retail-ii-uci)
+
+### 🛠️ Hướng dẫn thiết lập dữ liệu thô:
+1. Tải file dữ liệu CSV `online_retail_cleaned.csv` từ Kaggle
+2. Tạo thư mục `data/raw/` ở thư mục gốc của dự án nếu chưa có.
+3. Đặt file vừa tải vào thư mục: `data/raw/online_retail_cleaned.csv`.
+4. Chạy script tiền xử lý dữ liệu:
+   ```bash
+   python data_processing/process.py
 
 ---
 
