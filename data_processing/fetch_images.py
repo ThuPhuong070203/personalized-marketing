@@ -107,22 +107,48 @@ def get_from_local(article_id: str) -> Path | None:
     return p if p.exists() else None
 
 
-def get_from_kaggle(article_id: str) -> Path | None:
-    """Tải 1 ảnh từ Kaggle vào thư mục tạm; trả về đường dẫn file .jpg hoặc None nếu không có."""
+_last_error_log = [0.0]
+
+
+def _log_error(msg: str) -> None:
+    """In lỗi tối đa 1 lần mỗi 30 giây để không làm ngập terminal."""
+    now = time.time()
+    if now - _last_error_log[0] > 30:
+        _last_error_log[0] = now
+        print(f"  [Kaggle] {msg[:200]}")
+
+
+def get_from_kaggle(article_id: str) -> Path | str | None:
+    """
+    Tải 1 ảnh từ Kaggle vào thư mục tạm.
+    Trả về: đường dẫn file .jpg | None (sản phẩm không có ảnh, lỗi 404) | "error" (lỗi tạm thời).
+    Lỗi tạm thời (bị giới hạn tốc độ 429, lỗi mạng, lỗi máy chủ 5xx) sẽ được thử lại, chờ lâu dần.
+    """
     import kagglehub  # import trễ: chỉ cần khi thật sự tải từ Kaggle
 
     out_dir = TMP_DIR / article_id
     out_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        p = Path(kagglehub.competition_download(
-            config.KAGGLE_COMPETITION, path=kaggle_image_path(article_id), output_dir=str(out_dir)
-        ))
-    except Exception as e:
-        msg = str(e)
-        # Lỗi xác thực -> dừng hẳn để người dùng sửa, không cố tải tiếp hàng nghìn ảnh
-        if "Unauthenticated" in type(e).__name__ or "401" in msg or "403" in msg:
-            raise
-        return None  # thường là sản phẩm không có ảnh (404)
+    p = None
+    for attempt in range(5):
+        try:
+            p = Path(kagglehub.competition_download(
+                config.KAGGLE_COMPETITION, path=kaggle_image_path(article_id), output_dir=str(out_dir)
+            ))
+            break
+        except Exception as e:
+            msg = f"{type(e).__name__}: {e}"
+            # Lỗi xác thực -> dừng hẳn để người dùng sửa
+            if "Unauthenticated" in type(e).__name__ or " 401" in msg or "403" in msg:
+                raise
+            # Không có ảnh cho sản phẩm này
+            if "404" in msg or "Not Found" in msg or "not found" in msg:
+                return None
+            # Lỗi tạm thời -> chờ rồi thử lại (15s, 30s, 60s, 120s)
+            wait = 15 * (2 ** attempt)
+            _log_error(f"{msg} -> chờ {wait}s rồi thử lại")
+            time.sleep(wait)
+    if p is None:
+        return "error"
 
     # kagglehub có thể trả về file .jpg, file .zip, hoặc thư mục
     if p.is_dir():
@@ -137,10 +163,15 @@ def get_from_kaggle(article_id: str) -> Path | None:
 
 
 def fetch_one(article_id: str, use_local: bool) -> tuple[str, str]:
-    """Lấy + chuyển 1 ảnh. Trả về (article_id, trạng thái: ok | missing)."""
+    """Lấy + chuyển 1 ảnh. Trả về (article_id, trạng thái: ok | missing | error)."""
     target = config.IMAGES_DIR / f"{article_id}.jpg"
     src = get_from_local(article_id) if use_local else get_from_kaggle(article_id)
+    if src == "error":
+        shutil.rmtree(TMP_DIR / article_id, ignore_errors=True)
+        return article_id, "error"   # lỗi tạm thời -> lần chạy sau sẽ thử lại
     if src is None:
+        if not use_local:
+            shutil.rmtree(TMP_DIR / article_id, ignore_errors=True)
         return article_id, "missing"
     try:
         to_square(src, target)
@@ -161,7 +192,9 @@ def main():
                         help="Số sản phẩm bán chạy nhất được lấy ảnh")
     parser.add_argument("--force", action="store_true", help="Tải lại cả ảnh đã có")
     parser.add_argument("--test", action="store_true", help="Chỉ tải thử 1 ảnh để kiểm tra kết nối Kaggle")
-    parser.add_argument("--workers", type=int, default=4, help="Số luồng tải song song")
+    parser.add_argument("--retry-missing", action="store_true",
+                        help="Thử lại cả những sản phẩm trước đó bị đánh dấu là không có ảnh")
+    parser.add_argument("--workers", type=int, default=2, help="Số luồng tải song song (nhiều quá dễ bị Kaggle chặn)")
     args = parser.parse_args()
 
     t0 = time.time()
@@ -192,26 +225,32 @@ def main():
             print("❌ Không tải được ảnh. Kiểm tra kaggle.json và việc đã đồng ý luật cuộc thi.")
         return
 
+    shutil.rmtree(TMP_DIR, ignore_errors=True)  # dọn thư mục tạm còn sót từ lần chạy bị dừng giữa chừng
     manifest = {} if args.force else load_json(MANIFEST_PATH)
     top_ids = df["stockcode"].head(args.top_n).tolist()
+    if args.retry_missing:
+        manifest = {a: v for a, v in manifest.items() if v != "missing"}
     todo = [a for a in top_ids
-            if args.force or manifest.get(a) != "ok" or not (config.IMAGES_DIR / f"{a}.jpg").exists()]
+            if args.force or manifest.get(a) not in ("ok", "missing")
+            or (manifest.get(a) == "ok" and not (config.IMAGES_DIR / f"{a}.jpg").exists())]
     print(f"Tổng sản phẩm: {len(df):,} | Lấy ảnh cho top {len(top_ids):,} | Cần tải: {len(todo):,}")
 
-    stats = {"ok": 0, "missing": 0}
+    stats = {"ok": 0, "missing": 0, "error": 0}
     done = 0
     with ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
         futures = [pool.submit(fetch_one, a, use_local) for a in todo]
         for fut in as_completed(futures):
             aid, status = fut.result()
-            manifest[aid] = status
+            if status != "error":       # lỗi tạm thời không ghi vào manifest -> lần sau thử lại
+                manifest[aid] = status
             stats[status] += 1
             done += 1
             if done % 100 == 0 or done == len(todo):
                 save_json(MANIFEST_PATH, manifest)
                 rate = done / max(time.time() - t0, 1e-6)
                 eta = (len(todo) - done) / max(rate, 1e-6) / 60
-                print(f"  ... {done:,}/{len(todo):,} ảnh (thiếu ảnh: {stats['missing']:,}) "
+                print(f"  ... {done:,}/{len(todo):,} ảnh (thành công: {stats['ok']:,} | "
+                      f"không có ảnh: {stats['missing']:,} | lỗi tạm thời: {stats['error']:,}) "
                       f"| ~{rate:.1f} ảnh/giây | còn ~{eta:.0f} phút")
     save_json(MANIFEST_PATH, manifest)
     shutil.rmtree(TMP_DIR, ignore_errors=True)
@@ -231,6 +270,7 @@ def main():
     print(f"Sản phẩm có ảnh           : {n_img:,} / {len(df):,}")
     print(f"Tỷ lệ lượt mua có ảnh     : {share:.1%}  (sản phẩm có ảnh chiếm bấy nhiêu % lượt mua)")
     print(f"Không có ảnh trên Kaggle  : {stats['missing']:,}")
+    print(f"Lỗi tạm thời (chạy lại để thử lại): {stats['error']:,}")
     print(f"Dung lượng data/images    : {size_mb:,.0f} MB")
     print(f"-> Đã cập nhật: {config.PRODUCTS_PATH}")
     print(f"Thời gian                 : {time.time() - t0:.1f}s")
