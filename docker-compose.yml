@@ -13,7 +13,6 @@ services:
       - ./backend/models:/app/backend/models
     environment:
       - PYTHONUNBUFFERED=1
-      - PEXELS_API_KEY=${PEXELS_API_KEY:-}
 
   frontend:
     build:
