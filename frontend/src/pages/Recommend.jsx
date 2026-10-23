@@ -28,7 +28,7 @@ const MODEL_OPTIONS = [
 
 export default function Recommend() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const initialCid = searchParams.get('customer_id') || '12347';
+  const initialCid = searchParams.get('customer_id') || '524769';
 
   const [customerId, setCustomerId] = useState(initialCid);
   const [topK, setTopK] = useState(10);
@@ -43,12 +43,13 @@ export default function Recommend() {
 
   // Danh sách khách hàng mẫu đại diện cho đủ 4 cụm + cold-start
   const sampleCustomers = [
-    { id: 12352, label: 'Khách #12352', tag: 'Khách VIP', badgeClass: 'badge-vip' },
-    { id: 12347, label: 'Khách #12347', tag: 'Trung thành', badgeClass: 'badge-loyal' },
-    { id: 12348, label: 'Khách #12348', tag: 'Khách mới', badgeClass: 'badge-new' },
-    { id: 12350, label: 'Khách #12350', tag: 'Nguy cơ rời bỏ', badgeClass: 'badge-risk' },
-    { id: 999999, label: 'Khách #999999', tag: 'Cold-Start', badgeClass: 'badge-neutral' },
+    { id: 524769, label: 'Khách #524769', tag: 'Khách VIP', badgeClass: 'badge-vip' },
+    { id: 39187, label: 'Khách #39187', tag: 'Trung thành', badgeClass: 'badge-loyal' },
+    { id: 359243, label: 'Khách #359243', tag: 'Khách mới', badgeClass: 'badge-new' },
+    { id: 342461, label: 'Khách #342461', tag: 'Nguy cơ rời bỏ', badgeClass: 'badge-risk' },
+    { id: 9999999, label: 'Khách #9999999', tag: 'Cold-Start', badgeClass: 'badge-neutral' },
   ];
+
 
   const fetchRecommendations = async (cid, k, mA, mB, compare) => {
     try {

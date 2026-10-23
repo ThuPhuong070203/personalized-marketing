@@ -70,11 +70,12 @@ def health_check():
 @app.get("/customers", response_model=list[CustomerSummary], tags=["Customers"])
 def get_customers(
     search: str = Query("", description="Chuỗi tìm kiếm theo customer_id"),
-    limit: int = Query(50, ge=1, le=500, description="Số lượng khách hàng tối đa trả về")
+    limit: int = Query(50, ge=1, le=500, description="Số lượng khách hàng tối đa trả về"),
+    offset: int = Query(0, ge=0, description="Bỏ qua bao nhiêu khách đầu tiên (phân trang)")
 ):
-    """Lấy danh sách khách hàng, có hỗ trợ tìm kiếm theo ID."""
+    """Lấy danh sách khách hàng, có hỗ trợ tìm kiếm theo ID và phân trang."""
     service = ModelService.get_instance()
-    return service.get_customers(search=search, limit=limit)
+    return service.get_customers(search=search, limit=limit, offset=offset)
 
 
 @app.get("/customers/{customer_id}", response_model=CustomerDetail, tags=["Customers"])
@@ -162,3 +163,4 @@ def get_metrics():
     """Lấy toàn bộ chỉ số đánh giá phân cụm và các mô hình gợi ý."""
     service = ModelService.get_instance()
     return service.get_metrics()
+    

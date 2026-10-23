@@ -1,9 +1,11 @@
 pandas
 numpy
 pyarrow
+polars
 scipy
 scikit-learn
 implicit
+kagglehub
 requests
 Pillow
 fastapi

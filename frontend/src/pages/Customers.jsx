@@ -2,11 +2,18 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api, getImageUrl } from '../api';
 import LoadingSpinner from '../components/LoadingSpinner';
-import { Search, Users, AlertTriangle, ArrowRight, Clock, ShoppingCart, DollarSign, ChevronRight } from 'lucide-react';
+import { Search, Users, AlertTriangle, ArrowRight, Clock, ShoppingCart, DollarSign, ChevronRight, ChevronLeft } from 'lucide-react';
+
+const PAGE_SIZE = 50;
+
+// Giá trong bộ dữ liệu H&M đã được chuẩn hóa (không phải tiền thật) -> không gắn ký hiệu tiền tệ
+const fmtValue = (v, digits = 3) =>
+  Number(v || 0).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits });
 
 export default function Customers() {
   const navigate = useNavigate();
   const [searchTerm, setSearchTerm] = useState('');
+  const [page, setPage] = useState(0);
   const [customers, setCustomers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -21,7 +28,7 @@ export default function Customers() {
     const delayDebounce = setTimeout(async () => {
       try {
         setLoading(true);
-        const data = await api.getCustomers(searchTerm, 50);
+        const data = await api.getCustomers(searchTerm, PAGE_SIZE, page * PAGE_SIZE);
         setCustomers(data);
         // Tự động chọn khách hàng đầu tiên nếu chưa chọn ai
         if (data.length > 0 && !selectedCustomerId) {
@@ -35,7 +42,7 @@ export default function Customers() {
     }, 300);
 
     return () => clearTimeout(delayDebounce);
-  }, [searchTerm]);
+  }, [searchTerm, page]);
 
   const loadCustomerDetail = async (cid) => {
     try {
@@ -77,7 +84,7 @@ export default function Customers() {
             className="input-field"
             placeholder="Tìm theo Mã Khách Hàng (Customer ID)..."
             value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
+            onChange={(e) => { setSearchTerm(e.target.value); setPage(0); }}
           />
         </div>
       </div>
@@ -92,7 +99,9 @@ export default function Customers() {
               <Users size={18} color="var(--primary-light)" />
               Danh Sách Khách Hàng ({customers.length})
             </h3>
-            <span style={{ fontSize: '0.8rem', color: 'var(--text-dim)' }}>Tối đa 50 kết quả</span>
+            <span style={{ fontSize: '0.8rem', color: 'var(--text-dim)' }}>
+              Trang {page + 1} • #{page * PAGE_SIZE + 1}–{page * PAGE_SIZE + customers.length}
+            </span>
           </div>
 
           {loading ? (
@@ -108,7 +117,7 @@ export default function Customers() {
                   <tr>
                     <th>Mã KH</th>
                     <th>Nhóm Cụm</th>
-                    <th>Tổng Chi Tiêu</th>
+                    <th title="Giá trong dữ liệu H&M đã được chuẩn hóa">Giá Trị (chuẩn hóa)</th>
                     <th></th>
                   </tr>
                 </thead>
@@ -131,7 +140,7 @@ export default function Customers() {
                           </span>
                         </td>
                         <td style={{ color: 'var(--accent-emerald)', fontWeight: 600 }}>
-                          £{c.monetary.toLocaleString()}
+                          {fmtValue(c.monetary)}
                         </td>
                         <td style={{ textAlign: 'right' }}>
                           <ChevronRight size={16} color={isSelected ? 'var(--primary-light)' : '#64748b'} />
@@ -143,6 +152,31 @@ export default function Customers() {
               </table>
             </div>
           )}
+
+          {/* Phân trang */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '1rem' }}>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              style={{ padding: '0.5rem 0.9rem', fontSize: '0.85rem' }}
+              disabled={page === 0 || loading}
+              onClick={() => setPage((p) => Math.max(0, p - 1))}
+            >
+              <ChevronLeft size={16} /> Trang trước
+            </button>
+            <span style={{ fontSize: '0.8rem', color: 'var(--text-dim)' }}>
+              {searchTerm ? 'Kết quả tìm kiếm' : 'Ưu tiên khách có gợi ý cá nhân hóa'}
+            </span>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              style={{ padding: '0.5rem 0.9rem', fontSize: '0.85rem' }}
+              disabled={customers.length < PAGE_SIZE || loading}
+              onClick={() => setPage((p) => p + 1)}
+            >
+              Trang sau <ChevronRight size={16} />
+            </button>
+          </div>
         </div>
 
         {/* Khung chi tiết khách hàng và lịch sử mua gần nhất */}
@@ -205,10 +239,10 @@ export default function Customers() {
                 <div style={{ background: 'rgba(255, 255, 255, 0.03)', padding: '1rem', borderRadius: '12px', border: '1px solid var(--border-card)' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: 'var(--text-muted)', fontSize: '0.78rem', marginBottom: '4px' }}>
                     <DollarSign size={14} color="#10b981" />
-                    <span>MONETARY (GIÁ TRỊ)</span>
+                    <span title="Giá trong dữ liệu H&M đã được chuẩn hóa, chỉ dùng để so sánh">MONETARY (CHUẨN HÓA)</span>
                   </div>
                   <div style={{ fontSize: '1.3rem', fontWeight: 700, color: 'var(--accent-emerald)' }}>
-                    £{customerDetail.monetary.toLocaleString()}
+                    {fmtValue(customerDetail.monetary)}
                   </div>
                 </div>
               </div>
@@ -255,7 +289,7 @@ export default function Customers() {
                         </div>
                         <div style={{ textAlign: 'right' }}>
                           <div style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--text-main)' }}>
-                            £{item.total_price.toFixed(2)}
+                            {fmtValue(item.total_price, 4)}
                           </div>
                           <div style={{ fontSize: '0.75rem', color: 'var(--text-dim)' }}>
                             SL: {item.quantity}
