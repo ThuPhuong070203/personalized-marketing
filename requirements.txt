@@ -5,12 +5,11 @@ polars
 scipy
 scikit-learn
 implicit
+joblib
 kagglehub
-requests
 Pillow
 fastapi
 uvicorn[standard]
 pydantic
-joblib
 matplotlib
 jupyter
