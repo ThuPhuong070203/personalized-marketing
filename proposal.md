@@ -128,7 +128,7 @@ Cách chia này mô phỏng đúng thực tế: dùng quá khứ để đoán t�
 | **Frequency** | Số đơn hàng (số ngày có mua) | 1 | 2 | 4,2 | 200 |
 | **Monetary** | Tổng giá trị đã chi (giá chuẩn hóa) | 0,0008 | 0,195 | 0,401 | 29,44 |
 
-Tính trên **962.288 khách**. Cả ba chỉ số đều **lệch phải rất mạnh**: một nửa số khách chỉ mua 2 đơn trở xuống, trong khi có khách mua tới 200 đơn; trung bình Monetary gấp đôi trung vị. Đây là lý do phải biến đổi `log1p` trước khi phân cụm (mục 5.1).
+Tính trên **962.288 khách**. Cả ba chỉ số đều **lệch phải rất mạnh**: một nửa số khách chỉ mua 2 đơn trở xuống, trong khi có khách mua tới 200 đơn; trung bình Monetary gấp đôi trung vị. Đây là lý do phải biến đổi `log1p` trước khi phân cụm (mục 5.1). Riêng **Recency** phân bố tương đối đều, và sau `log1p` lại bị lệch ngược. Điều này cho thấy log chỉ thật sự cần cho Frequency và Monetary (xem mục Hạn chế).
 
 **Ma trận tương tác khách × sản phẩm:** chỉ giữ khách có ≥ 2 đơn hàng và sản phẩm có ≥ 20 lượt mua. Các mô hình gợi ý giới hạn ở **10.000 sản phẩm phổ biến nhất** và **50.000 khách** lấy ngẫu nhiên, vì ma trận độ tương đồng đầy đủ giữa 105 nghìn sản phẩm cần hàng chục GB RAM. Phân cụm RFM vẫn chạy trên toàn bộ khách. Khách không đủ điều kiện vẫn được gợi ý bằng mô hình Popularity.
 
@@ -139,7 +139,7 @@ Tính trên **962.288 khách**. Cả ba chỉ số đều **lệch phải rất 
 | Số sản phẩm trong ma trận | 10.000 |
 | Độ thưa (tỷ lệ ô trống) | 99,87% |
 
-Độ thưa 99,87% nghĩa là trung bình mỗi khách chỉ mua khoảng 13 trong 10.000 sản phẩm. Đây là đặc điểm điển hình của bài toán gợi ý, và cũng là lý do các mô hình lưu ma trận ở dạng thưa (sparse) để tiết kiệm bộ nhớ.
+Độ thưa 99,87% nghĩa là trung bình mỗi khách chỉ mua khoảng 13 trong 10.000 sản phẩm. Giới hạn ở 10.000 sản phẩm phổ biến nhất vẫn giữ được phần lớn nhu cầu: trong 70.906 sản phẩm bán ra cả năm, **top 10.000 (~14%) chiếm 74,3% lượt mua** (hiện tượng "đuôi dài", xem notebook EDA). Đây là đặc điểm điển hình của bài toán gợi ý, và cũng là lý do các mô hình lưu ma trận ở dạng thưa (sparse) để tiết kiệm bộ nhớ.
 
 **Đáp án để chấm điểm (`test_truth`):** những sản phẩm khách thực sự mua trong 28 ngày cuối. Để thời gian đánh giá hợp lý, hệ thống **lấy ngẫu nhiên 10.000 khách** có trong ma trận tương tác và có mua trong tập test → **41.286 cặp** (khách, sản phẩm) dùng để chấm điểm.
 
@@ -267,6 +267,7 @@ Phân cụm chạy trên **962.288 khách** (toàn bộ khách có mua trong t�
 - Chỉ có ảnh của 15.000 sản phẩm bán chạy nhất (84,3% lượt mua); sản phẩm khác hiển thị ảnh mặc định.
 - Mới đánh giá trên một mốc cắt thời gian; có thể thử thêm đánh giá cuốn chiếu (rolling evaluation) để kiểm tra độ ổn định.
 - Trọng số Hybrid chưa được tinh chỉnh trên một tập validation riêng.
+- Biến đổi `log1p` được áp dụng cho cả 3 chỉ số RFM, trong khi Recency vốn không lệch mạnh; có thể chỉ biến đổi log cho Frequency và Monetary rồi so sánh chất lượng phân cụm.
 
 ---
 
@@ -283,4 +284,4 @@ Kế hoạch đến hạn nộp (tháng 12/2026), theo thứ tự ưu tiên:
 | 5 | **Gợi ý theo từng phân khúc** | Mỗi nhóm khách một chiến lược gợi ý / bộ trọng số Hybrid riêng; so sánh với một công thức chung bằng chỉ số đánh giá theo từng nhóm |
 | 6 | **Hoàn thiện giao diện** | Cải thiện màu sắc, bố cục, thẻ sản phẩm |
 
-Các hướng mở rộng khác: phân cụm kết hợp tuổi và kênh mua, dự đoán khách sắp rời bỏ (churn), gợi ý theo mùa vụ, gợi ý theo độ giống hình ảnh (CLIP – bộ dữ liệu có sẵn ảnh thật), chuyển pipeline sang PySpark để chạy trên cụm máy.
+Các hướng mở rộng khác: chỉ biến đổi log cho Frequency và Monetary khi phân cụm, phân cụm kết hợp tuổi và kênh mua, dự đoán khách sắp rời bỏ (churn), gợi ý theo mùa vụ, gợi ý theo độ giống hình ảnh (CLIP – bộ dữ liệu có sẵn ảnh thật), chuyển pipeline sang PySpark để chạy trên cụm máy.
