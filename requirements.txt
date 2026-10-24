@@ -1,14 +1,15 @@
 pandas
 numpy
 pyarrow
+polars
 scipy
 scikit-learn
 implicit
-requests
+joblib
+kagglehub
 Pillow
 fastapi
 uvicorn[standard]
 pydantic
-joblib
 matplotlib
 jupyter

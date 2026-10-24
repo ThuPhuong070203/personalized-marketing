@@ -177,8 +177,14 @@ def train_recommenders(
     als_model.fit(interactions)
 
     # 5. Content-Based
+    # Chỉ dùng các sản phẩm có trong ma trận tương tác (tối đa MAX_ITEMS_CF),
+    # vì ma trận TF-IDF dạng dense cho toàn bộ ~100 nghìn sản phẩm sẽ tốn rất nhiều RAM.
     print("5. Huấn luyện ContentBasedRecommender (TF-IDF)...")
-    content_model = ContentBasedRecommender(products_df)
+    content_products = products_df[
+        products_df["stockcode"].isin(set(interactions["stockcode"].astype(str)))
+    ].reset_index(drop=True)
+    print(f"   Số sản phẩm dùng cho Content-Based: {len(content_products):,}")
+    content_model = ContentBasedRecommender(content_products)
     content_model.fit(interactions)
 
     # 6. Hybrid
@@ -280,3 +286,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    

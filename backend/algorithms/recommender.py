@@ -209,7 +209,8 @@ class ItemCFRecommender(BaseRecommender):
 
         # Tính cosine similarity giữa các cột (sản phẩm): item_matrix.T (shape: n_items x n_users)
         item_user = self.user_item_matrix.T.tocsr()
-        self.item_sim = cosine_similarity(item_user, dense_output=True)
+        # float32 thay vì float64: giảm một nửa RAM (10.000 sản phẩm: ~0,4 GB thay vì ~0,8 GB)
+        self.item_sim = cosine_similarity(item_user, dense_output=True).astype(np.float32)
 
         return self
 
@@ -221,13 +222,15 @@ class ItemCFRecommender(BaseRecommender):
 
         u_idx = self.cust_to_idx[customer_id]
         # Vector tương tác của người dùng: 1 x n_items
-        u_vec = self.user_item_matrix[u_idx].toarray().flatten()
+        u_row = self.user_item_matrix[u_idx]
 
-        if np.sum(u_vec) == 0:
+        if u_row.nnz == 0:
             return self.global_pop.recommend(customer_id, k, exclude_seen)
 
-        # Điểm gợi ý = u_vec @ item_sim (1 x n_items)
-        scores = u_vec @ self.item_sim
+        # Điểm gợi ý = u_vec @ item_sim (1 x n_items).
+        # Dùng hàng thưa: chỉ cộng các hàng item_sim của những món khách đã mua,
+        # nhanh hơn nhiều so với nhân cả vector dày 10.000 phần tử.
+        scores = np.asarray(u_row @ self.item_sim).ravel()
 
         seen = self.user_seen.get(customer_id, set()) if exclude_seen else set()
         
@@ -387,9 +390,13 @@ class ContentBasedRecommender(BaseRecommender):
         self.stockcode_list = prods["stockcode"].tolist()
         self.stockcode_to_idx = {sc: i for i, sc in enumerate(self.stockcode_list)}
 
-        # Tính TF-IDF ma trận sản phẩm
-        tfidf_sparse = self.tfidf.fit_transform(prods["description"])
-        self.tfidf_matrix = tfidf_sparse.toarray()
+        # Tính TF-IDF ma trận sản phẩm.
+        # Bộ H&M có cột content_text (tên + loại + nhóm + màu + mô tả chi tiết) -> ưu tiên dùng;
+        # nếu không có thì dùng description như cũ.
+        text_col = "content_text" if "content_text" in prods.columns else "description"
+        tfidf_sparse = self.tfidf.fit_transform(prods[text_col].fillna("").astype(str))
+        # TfidfVectorizer đã chuẩn hóa L2 từng dòng -> tích vô hướng = cosine similarity.
+        self.tfidf_matrix = tfidf_sparse.toarray().astype(np.float32)
 
         # Xây dựng vector profile cho từng người dùng
         df = interactions.copy()
@@ -410,7 +417,7 @@ class ContentBasedRecommender(BaseRecommender):
                 norm = np.linalg.norm(user_vec)
                 if norm > 0:
                     user_vec = user_vec / norm
-                self.user_profiles[cust_id] = user_vec
+                self.user_profiles[cust_id] = user_vec.astype(np.float32)
 
         return self
 
@@ -420,9 +427,11 @@ class ContentBasedRecommender(BaseRecommender):
         if customer_id not in self.user_profiles or self.tfidf_matrix is None:
             return self.global_pop.recommend(customer_id, k, exclude_seen)
 
-        user_vec = self.user_profiles[customer_id].reshape(1, -1)
-        # Cosine similarity: (1 x n_features) x (n_features x n_items) -> 1 x n_items
-        scores = cosine_similarity(user_vec, self.tfidf_matrix)[0]
+        user_vec = self.user_profiles[customer_id]
+        # Cosine similarity = tích vô hướng, vì cả hồ sơ khách lẫn từng dòng TF-IDF đều đã chuẩn hóa L2.
+        # Không gọi cosine_similarity() ở đây: hàm đó chuẩn hóa lại cả ma trận ở MỖI lần gọi
+        # (tạo bản sao ~80 MB/lần) -> rất chậm và làm treo máy khi đánh giá 10.000 khách.
+        scores = self.tfidf_matrix @ user_vec
 
         seen = self.user_seen.get(customer_id, set()) if exclude_seen else set()
         top_indices = np.argsort(scores)[::-1]
@@ -524,3 +533,4 @@ class HybridRecommender(BaseRecommender):
                     break
 
         return results[:k]
+        

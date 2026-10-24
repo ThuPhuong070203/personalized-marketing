@@ -40,8 +40,8 @@ export const api = {
   getHealth: () => request('/health'),
 
   // Danh sách khách hàng
-  getCustomers: (search = '', limit = 50) =>
-    request(`/customers?search=${encodeURIComponent(search)}&limit=${limit}`),
+  getCustomers: (search = '', limit = 50, offset = 0) =>
+    request(`/customers?search=${encodeURIComponent(search)}&limit=${limit}&offset=${offset}`),
 
   // Chi tiết 1 khách hàng
   getCustomer: (customerId) => request(`/customers/${customerId}`),

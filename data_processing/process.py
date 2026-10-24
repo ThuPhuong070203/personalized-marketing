@@ -1,405 +1,364 @@
 """
-Script làm sạch dữ liệu, chia train/test theo thời gian và tạo các tập dữ liệu trung gian:
-- transactions_clean.parquet
-- train.parquet, test.parquet
-- rfm_train.parquet
-- interactions_train.parquet
-- products.csv
-- test_truth.parquet
+Tiền xử lý bộ dữ liệu H&M Personalized Fashion Recommendations (data_processing/process.py).
+
+Dùng Polars (xử lý lười - lazy) + Parquet để xử lý ~31,8 triệu giao dịch trên laptop.
+Đầu ra GIỮ NGUYÊN định dạng cột như pipeline cũ, để train.py / recommender.py / backend
+chạy được mà không phải sửa:
+
+  - transactions_clean.parquet, train.parquet, test.parquet
+        customer_id (int), invoice, invoice_date, stockcode, description,
+        quantity, price, total_price, sales_channel_id
+  - rfm_train.parquet          customer_id, recency, frequency, monetary
+  - interactions_train.parquet customer_id, stockcode, n_purchases, quantity
+  - products.csv               stockcode, description, n_purchases, image_path, ... , content_text
+  - test_truth.parquet         customer_id, stockcode
+  - customers.parquet          customer_id, age, club_member_status, fashion_news_frequency
+  - customer_id_map.parquet    customer_hash (mã gốc H&M) <-> customer_id (số nguyên)
+
+Quy ước ánh xạ H&M -> cột cũ:
+  article_id -> stockcode, prod_name -> description, t_dat -> invoice_date,
+  (khách, ngày mua) -> invoice, số dòng trùng -> quantity, price × quantity -> total_price
 """
 
 import sys
 import time
 from pathlib import Path
 
-# Đảm bảo import được config từ thư mục gốc
+import numpy as np
+import polars as pl
+
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 import config
-import pandas as pd
-import numpy as np
 
 
-def find_raw_data_file() -> Path:
-    """
-    Tìm file dữ liệu thô từ đường dẫn cấu hình hoặc các vị trí dự phòng.
-    """
-    if config.RAW_DATA_PATH.exists():
-        return config.RAW_DATA_PATH
-    for fallback in config.FALLBACK_RAW_DATA_PATHS:
-        if fallback.exists():
-            return fallback
-    raise FileNotFoundError(
-        f"Không tìm thấy file dữ liệu thô tại '{config.RAW_DATA_PATH}' "
-        f"hoặc các vị trí dự phòng. Vui lòng tải file online_retail_cleaned.csv "
-        f"vào thư mục data/raw/."
-    )
-
-
-def load_and_standardize_schema(file_path: Path) -> pd.DataFrame:
-    """
-    Đọc file CSV và chuẩn hóa tên cột (tự động phát hiện cột ngày và cột đơn giá).
-    """
-    print(f"\n[1/5] Đang đọc dữ liệu từ: {file_path}")
-    start_t = time.time()
-    
-    # Đọc mẫu 1000 dòng để dò tên cột và kiểu dữ liệu
-    df_sample = pd.read_csv(file_path, nrows=1000)
-    col_mapping = {}
-    lower_cols = {col.lower().strip(): col for col in df_sample.columns}
-    
-    # Tìm cột invoice/hóa đơn
-    for candidate in ["invoice", "invoiceno", "invoice_no"]:
-        if candidate in lower_cols:
-            col_mapping[lower_cols[candidate]] = "invoice"
-            break
-            
-    # Tìm cột stockcode/mã sản phẩm
-    for candidate in ["stockcode", "stock_code"]:
-        if candidate in lower_cols:
-            col_mapping[lower_cols[candidate]] = "stockcode"
-            break
-            
-    # Tìm cột description/mô tả
-    for candidate in ["description", "desc"]:
-        if candidate in lower_cols:
-            col_mapping[lower_cols[candidate]] = "description"
-            break
-            
-    # Tìm cột quantity/số lượng
-    for candidate in ["quantity", "qty"]:
-        if candidate in lower_cols:
-            col_mapping[lower_cols[candidate]] = "quantity"
-            break
-            
-    # Tìm cột chứa 'date'
-    for col_lower, original_col in lower_cols.items():
-        if "date" in col_lower:
-            col_mapping[original_col] = "invoice_date"
-            break
-            
-    # Tìm cột price/đơn giá
-    for candidate in ["price", "unitprice", "unit_price"]:
-        if candidate in lower_cols:
-            col_mapping[lower_cols[candidate]] = "price"
-            break
-            
-    # Tìm cột customer_id/mã khách hàng
-    for candidate in ["customer_id", "customerid"]:
-        if candidate in lower_cols:
-            col_mapping[lower_cols[candidate]] = "customer_id"
-            break
-            
-    # Tìm cột country/quốc gia
-    for candidate in ["country"]:
-        if candidate in lower_cols:
-            col_mapping[lower_cols[candidate]] = "country"
-            break
-            
-    # Tìm cột is_cancelled
-    for candidate in ["is_cancelled", "cancelled", "iscancelled"]:
-        if candidate in lower_cols:
-            col_mapping[lower_cols[candidate]] = "is_cancelled"
-            break
-            
-    # Tìm cột total_price
-    for candidate in ["total_price", "totalprice"]:
-        if candidate in lower_cols:
-            col_mapping[lower_cols[candidate]] = "total_price"
-            break
-
-    # Đọc toàn bộ file với kiểu dữ liệu stockcode và invoice là str
-    dtype_spec = {
-        col_mapping.get(col, col): str
-        for col in ["invoice", "stockcode", "invoiceno", "stock_code"]
-    }
-    df = pd.read_csv(file_path, low_memory=False)
-    df.rename(columns=col_mapping, inplace=True)
-    
-    # In schema thực tế
-    print(f"Schema thực tế: {len(df):,} dòng, {len(df.columns)} cột")
-    for col in df.columns:
-        print(f"  - {col}: {df[col].dtype}")
-        
-    # Chuẩn hóa invoice_date
-    if "invoice_date" in df.columns:
-        df["invoice_date"] = pd.to_datetime(df["invoice_date"], errors="coerce")
+def log_rows(step: str, n: int, before: int | None = None) -> None:
+    if before is None:
+        print(f"  {step}: {n:,} dòng")
     else:
-        raise ValueError("Không tìm thấy cột chứa thông tin ngày tháng (invoice_date)!")
-
-    # Chuẩn hóa price nếu thiếu
-    if "price" not in df.columns or df["price"].isnull().all():
-        if "total_price" in df.columns and "quantity" in df.columns:
-            print("  -> Tính 'price' từ 'total_price / quantity'")
-            df["price"] = df["total_price"] / df["quantity"]
-        else:
-            raise ValueError("Không xác định được cột đơn giá 'price'!")
-            
-    df["price"] = pd.to_numeric(df["price"], errors="coerce")
-    df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce")
-    
-    print(f"Thời gian đọc và chuẩn hóa schema: {time.time() - start_t:.2f}s")
-    return df
+        print(f"  {step}: {n:,} dòng (giảm {before - n:,})")
 
 
-def clean_transactions(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Thực hiện 7 bước làm sạch dữ liệu theo quy định mục 2.1.
-    In số dòng sau mỗi bước để dùng cho báo cáo.
-    """
-    print("\n[2/5] Bắt đầu quá trình làm sạch dữ liệu:")
-    initial_rows = len(df)
-    print(f"  Số dòng ban đầu: {initial_rows:,}")
-
-    # Bước 1: Bỏ dòng thiếu customer_id, ép customer_id về int
-    df = df[df["customer_id"].notnull()].copy()
-    df["customer_id"] = df["customer_id"].astype(int)
-    print(f"  Bước 1 (Bỏ thiếu customer_id): {len(df):,} dòng (giảm {initial_rows - len(df):,})")
-    prev_rows = len(df)
-
-    # Bước 2: Bỏ dòng is_cancelled == True (hoặc invoice bắt đầu bằng 'C')
-    is_cancelled_mask = pd.Series(False, index=df.index)
-    if "is_cancelled" in df.columns:
-        is_cancelled_mask = (
-            df["is_cancelled"].astype(str).str.lower().isin(["true", "1", "yes"])
+# =========================================================
+# [1/6] CSV -> PARQUET
+# =========================================================
+def convert_transactions_to_parquet() -> None:
+    """Chuyển transactions_train.csv (~3,5 GB) sang Parquet theo kiểu streaming (không nạp hết vào RAM)."""
+    print("\n[1/6] Chuyển transactions_train.csv sang Parquet:")
+    if config.TRANSACTIONS_RAW_PARQUET.exists():
+        print(f"  Đã có sẵn: {config.TRANSACTIONS_RAW_PARQUET} -> bỏ qua")
+        return
+    if not config.TRANSACTIONS_RAW_PATH.exists():
+        raise FileNotFoundError(
+            f"Không tìm thấy {config.TRANSACTIONS_RAW_PATH}. "
+            "Chạy 'python data_processing/download_hm.py' và giải nén vào data/raw/hm/ trước."
         )
-    # Hóa đơn hủy thường có mã bắt đầu bằng chữ C
-    invoice_cancel_mask = df["invoice"].astype(str).str.upper().str.startswith("C")
-    cancelled = is_cancelled_mask | invoice_cancel_mask
-    df = df[~cancelled].copy()
-    print(f"  Bước 2 (Bỏ hóa đơn hủy): {len(df):,} dòng (giảm {prev_rows - len(df):,})")
-    prev_rows = len(df)
 
-    # Bước 3: Bỏ dòng quantity <= 0 hoặc price <= 0
-    df = df[(df["quantity"] > 0) & (df["price"] > 0)].copy()
-    print(f"  Bước 3 (Bỏ quantity <= 0 hoặc price <= 0): {len(df):,} dòng (giảm {prev_rows - len(df):,})")
-    prev_rows = len(df)
-
-    # Bước 4: Bỏ mã không phải sản phẩm
-    df["stockcode"] = df["stockcode"].astype(str).str.strip()
-    upper_stock = df["stockcode"].str.upper()
-    is_non_prod = upper_stock.isin(config.NON_PRODUCT_CODES)
-    for prefix in config.NON_PRODUCT_PREFIXES:
-        is_non_prod = is_non_prod | upper_stock.str.startswith(prefix)
-    df = df[~is_non_prod].copy()
-    print(f"  Bước 4 (Bỏ mã phi sản phẩm): {len(df):,} dòng (giảm {prev_rows - len(df):,})")
-    prev_rows = len(df)
-
-    # Bước 5: Bỏ dòng trùng lặp hoàn toàn
-    df = df.drop_duplicates().copy()
-    print(f"  Bước 5 (Bỏ trùng lặp hoàn toàn): {len(df):,} dòng (giảm {prev_rows - len(df):,})")
-    prev_rows = len(df)
-
-    # Bước 6: Chuẩn hóa description: chữ thường, strip khoảng trắng.
-    # Mỗi stockcode lấy mô tả xuất hiện nhiều nhất làm mô tả chính.
-    df["description"] = df["description"].fillna("").astype(str).str.lower().str.strip()
-    
-    # Tìm mô tả xuất hiện nhiều nhất cho từng stockcode
-    desc_counts = (
-        df[df["description"] != ""]
-        .groupby(["stockcode", "description"])
-        .size()
-        .reset_index(name="count")
+    t0 = time.time()
+    (
+        pl.scan_csv(
+            config.TRANSACTIONS_RAW_PATH,
+            schema_overrides={
+                "t_dat": pl.Utf8,
+                "customer_id": pl.Utf8,
+                "article_id": pl.Utf8,
+                "price": pl.Float64,
+                "sales_channel_id": pl.Int8,
+            },
+        )
+        .with_columns(
+            pl.col("t_dat").str.strptime(pl.Date, "%Y-%m-%d"),
+            pl.col("article_id").str.zfill(10),
+        )
+        .sink_parquet(config.TRANSACTIONS_RAW_PARQUET)
     )
-    # Sắp xếp theo số lần xuất hiện giảm dần và lấy hàng đầu tiên cho mỗi stockcode
-    best_descriptions = (
-        desc_counts.sort_values(["stockcode", "count"], ascending=[True, False])
-        .drop_duplicates(subset=["stockcode"])
-        .set_index("stockcode")["description"]
-        .to_dict()
-    )
-    
-    # Gán mô tả chuẩn cho các dòng
-    df["description"] = df["stockcode"].map(best_descriptions).fillna(df["description"])
-    # Nếu vẫn còn chuỗi rỗng thì đặt "unknown product"
-    df["description"] = df["description"].replace("", "unknown product")
-    print(f"  Bước 6 (Chuẩn hóa description theo stockcode): {len(df):,} dòng")
-    prev_rows = len(df)
+    csv_mb = config.TRANSACTIONS_RAW_PATH.stat().st_size / 1e6
+    pq_mb = config.TRANSACTIONS_RAW_PARQUET.stat().st_size / 1e6
+    print(f"  CSV: {csv_mb:,.0f} MB -> Parquet: {pq_mb:,.0f} MB (nhỏ hơn {csv_mb / pq_mb:.1f} lần)")
+    print(f"  Thời gian chuyển đổi: {time.time() - t0:.1f}s")
 
-    # Bước 7: Tính lại total_price = quantity * price
-    df["total_price"] = (df["quantity"] * df["price"]).round(2)
-    print(f"  Bước 7 (Tính lại total_price): {len(df):,} dòng")
 
-    # Giữ các cột chuẩn
-    output_cols = [
-        "invoice", "stockcode", "description", "quantity",
-        "invoice_date", "price", "customer_id", "country", "total_price"
+def load_articles() -> pl.DataFrame:
+    df = pl.read_csv(config.ARTICLES_RAW_PATH, schema_overrides={"article_id": pl.Utf8}, infer_schema_length=0)
+    keep = [
+        "article_id", "prod_name", "product_type_name", "product_group_name",
+        "colour_group_name", "department_name", "index_name", "garment_group_name", "detail_desc",
     ]
-    df = df[output_cols].copy()
-    print(f"Hoàn thành làm sạch: còn lại {len(df):,} dòng ({len(df)/initial_rows*100:.1f}% ban đầu)")
+    df = df.select([c for c in keep if c in df.columns]).with_columns(pl.col("article_id").str.zfill(10))
     return df
 
 
-def split_train_test(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Chia train/test theo thời gian: TEST_DAYS ngày cuối là test, còn lại là train.
-    """
-    print(f"\n[3/5] Chia tập Train/Test theo thời gian ({config.TEST_DAYS} ngày cuối làm Test):")
+# =========================================================
+# [2/6] LÀM SẠCH
+# =========================================================
+def clean_transactions(articles: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """Trả về (clean_df, customer_id_map)."""
+    print("\n[2/6] Làm sạch dữ liệu giao dịch:")
+    lf = pl.scan_parquet(config.TRANSACTIONS_RAW_PARQUET)
+
+    n0 = lf.select(pl.len()).collect().item()
+    log_rows("Dữ liệu ban đầu", n0)
+
+    # Bước 1: lọc theo khoảng thời gian
+    if config.DATA_START_DATE:
+        start = pl.lit(config.DATA_START_DATE).str.strptime(pl.Date, "%Y-%m-%d")
+        lf = lf.filter(pl.col("t_dat") >= start)
+    n1 = lf.select(pl.len()).collect().item()
+    log_rows(f"Bước 1 (Chỉ giữ từ {config.DATA_START_DATE or 'đầu'})", n1, n0)
+
+    # Bước 2: bỏ dòng thiếu mã / giá <= 0
+    lf = lf.filter(
+        pl.col("customer_id").is_not_null()
+        & pl.col("article_id").is_not_null()
+        & pl.col("t_dat").is_not_null()
+        & (pl.col("price") > 0)
+    )
+    n2 = lf.select(pl.len()).collect().item()
+    log_rows("Bước 2 (Bỏ thiếu mã khách/sản phẩm, giá <= 0)", n2, n1)
+
+    # Bước 3: gộp các dòng trùng (cùng khách, ngày, sản phẩm, giá, kênh) thành 1 dòng có quantity
+    # Ở H&M, mua 2 món giống hệt nhau = 2 dòng y hệt -> KHÔNG được xóa, mà phải đếm số lượng.
+    lf = lf.group_by(["customer_id", "t_dat", "article_id", "price", "sales_channel_id"]).agg(
+        pl.len().cast(pl.Int32).alias("quantity")
+    )
+    df = lf.collect()
+    log_rows("Bước 3 (Gộp dòng trùng thành số lượng)", len(df), n2)
+
+    # Bước 4: chỉ giữ sản phẩm có trong articles.csv
+    before = len(df)
+    df = df.join(articles.select("article_id", "prod_name"), on="article_id", how="inner")
+    log_rows("Bước 4 (Ghép tên sản phẩm từ articles.csv)", len(df), before)
+
+    # Bước 5: đổi mã khách (hash 64 ký tự) -> số nguyên ngắn
+    id_map = (
+        df.select(pl.col("customer_id").unique().sort())
+        .with_row_index("new_id", offset=1)
+        .select(
+            pl.col("customer_id").alias("customer_hash"),
+            pl.col("new_id").cast(pl.Int64).alias("customer_id"),
+        )
+    )
+    df = (
+        df.join(id_map, left_on="customer_id", right_on="customer_hash", how="left")
+        .drop("customer_id")
+        .rename({"customer_id_right": "customer_id"})
+    )
+    print(f"  Bước 5 (Đổi mã khách sang số nguyên): {len(id_map):,} khách")
+
+    # Đưa về đúng tên cột của pipeline cũ
+    df = df.select(
+        pl.col("customer_id"),
+        (pl.col("customer_id").cast(pl.Utf8) + "_" + pl.col("t_dat").cast(pl.Utf8)).alias("invoice"),
+        pl.col("t_dat").cast(pl.Datetime("us")).alias("invoice_date"),
+        pl.col("article_id").alias("stockcode"),
+        pl.col("prod_name").str.to_lowercase().alias("description"),
+        pl.col("quantity"),
+        pl.col("price"),
+        (pl.col("price") * pl.col("quantity")).alias("total_price"),
+        pl.col("sales_channel_id"),
+    )
+    print(f"  Hoàn thành làm sạch: còn {len(df):,} dòng ({len(df) / n0:.1%} so với ban đầu)")
+    return df, id_map
+
+
+# =========================================================
+# [3/6] CHIA TRAIN / TEST
+# =========================================================
+def split_train_test(df: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame]:
+    print(f"\n[3/6] Chia tập Train/Test theo thời gian ({config.TEST_DAYS} ngày cuối làm Test):")
     max_date = df["invoice_date"].max()
-    split_date = max_date - pd.Timedelta(days=config.TEST_DAYS)
-    
-    train_df = df[df["invoice_date"] <= split_date].copy()
-    test_df = df[df["invoice_date"] > split_date].copy()
-    
-    print(f"  Khoảng thời gian toàn bộ: {df['invoice_date'].min().strftime('%Y-%m-%d')} đến {max_date.strftime('%Y-%m-%d')}")
-    print(f"  Ngày phân tách (split_date): {split_date.strftime('%Y-%m-%d')}")
-    print(f"  Tập Train: {len(train_df):,} dòng ({train_df['invoice_date'].min().strftime('%Y-%m-%d')} đến {train_df['invoice_date'].max().strftime('%Y-%m-%d')}), {train_df['customer_id'].nunique():,} khách hàng")
-    print(f"  Tập Test: {len(test_df):,} dòng ({test_df['invoice_date'].min().strftime('%Y-%m-%d')} đến {test_df['invoice_date'].max().strftime('%Y-%m-%d')}), {test_df['customer_id'].nunique():,} khách hàng")
-    
+    split_date = max_date - np.timedelta64(config.TEST_DAYS, "D")
+    train_df = df.filter(pl.col("invoice_date") <= split_date)
+    test_df = df.filter(pl.col("invoice_date") > split_date)
+
+    fmt = lambda d: str(d)[:10]
+    print(f"  Khoảng thời gian toàn bộ: {fmt(df['invoice_date'].min())} đến {fmt(max_date)}")
+    print(f"  Ngày phân tách (split_date): {fmt(split_date)}")
+    print(f"  Tập Train: {len(train_df):,} dòng, {train_df['customer_id'].n_unique():,} khách hàng")
+    print(f"  Tập Test: {len(test_df):,} dòng, {test_df['customer_id'].n_unique():,} khách hàng")
     return train_df, test_df
 
 
-def compute_rfm_train(train_df: pd.DataFrame) -> pd.DataFrame:
+# =========================================================
+# [4/6] RFM
+# =========================================================
+def compute_rfm_train(train_df: pl.DataFrame) -> pl.DataFrame:
     """
-    Tính RFM trên tập Train:
-    - recency: số ngày từ lần mua cuối đến (ngày lớn nhất của train + 1 ngày)
-    - frequency: số invoice khác nhau
-    - monetary: tổng total_price
+    recency  = số ngày từ lần mua cuối đến (ngày lớn nhất của train + 1)
+    frequency = số đơn hàng (số ngày khác nhau có mua)
+    monetary  = tổng total_price (giá đã được H&M chuẩn hóa)
     """
-    print("\n[4/5] Tính chỉ số RFM trên tập Train (không data leakage):")
-    snapshot_date = train_df["invoice_date"].max() + pd.Timedelta(days=1)
-    
+    print("\n[4/6] Tính chỉ số RFM trên tập Train (không data leakage):")
+    snapshot = train_df["invoice_date"].max() + np.timedelta64(1, "D")
     rfm = (
-        train_df.groupby("customer_id")
+        train_df.group_by("customer_id")
         .agg(
-            recency=("invoice_date", lambda dates: (snapshot_date - dates.max()).days),
-            frequency=("invoice", "nunique"),
-            monetary=("total_price", "sum"),
+            pl.col("invoice_date").max().alias("last_date"),
+            pl.col("invoice").n_unique().cast(pl.Int32).alias("frequency"),
+            pl.col("total_price").sum().round(4).alias("monetary"),
         )
-        .reset_index()
+        .with_columns(
+            (pl.lit(snapshot) - pl.col("last_date")).dt.total_days().cast(pl.Int32).alias("recency")
+        )
+        .select("customer_id", "recency", "frequency", "monetary")
+        .sort("customer_id")
     )
-    
-    # Đảm bảo monetary không âm (đã lọc ở bước làm sạch) và làm tròn
-    rfm["monetary"] = rfm["monetary"].round(2)
-    rfm["recency"] = rfm["recency"].astype(int)
-    rfm["frequency"] = rfm["frequency"].astype(int)
-    
     print(f"  Số khách hàng trong rfm_train: {len(rfm):,}")
-    print(f"  Recency: min={rfm['recency'].min()}, mean={rfm['recency'].mean():.1f}, max={rfm['recency'].max()}")
-    print(f"  Frequency: min={rfm['frequency'].min()}, mean={rfm['frequency'].mean():.1f}, max={rfm['frequency'].max()}")
-    print(f"  Monetary: min={rfm['monetary'].min():.1f}, mean={rfm['monetary'].mean():.1f}, max={rfm['monetary'].max():.1f}")
-    
+    for c in ["recency", "frequency", "monetary"]:
+        print(f"  {c.capitalize()}: min={rfm[c].min():.4g}, mean={rfm[c].mean():.4g}, max={rfm[c].max():.4g}")
     return rfm
 
 
+# =========================================================
+# [5/6] INTERACTIONS, PRODUCTS, TEST_TRUTH
+# =========================================================
 def build_interactions_and_products(
-    clean_df: pd.DataFrame, train_df: pd.DataFrame, test_df: pd.DataFrame
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """
-    Tạo:
-    - interactions_train: ma trận tương tác khách-sản phẩm từ train_df
-    - products.csv: danh mục sản phẩm kèm số lượt mua
-    - test_truth: sự thật ngầm định cho tập test
-    """
-    print("\n[5/5] Xây dựng ma trận tương tác, danh mục sản phẩm và test_truth:")
-    
-    # 1. interactions_train
-    # n_purchases = số hóa đơn khác nhau chứa sản phẩm đó của khách
-    interactions = (
-        train_df.groupby(["customer_id", "stockcode"])
-        .agg(
-            n_purchases=("invoice", "nunique"),
-            quantity=("quantity", "sum")
-        )
-        .reset_index()
+    clean_df: pl.DataFrame, train_df: pl.DataFrame, test_df: pl.DataFrame, articles: pl.DataFrame
+) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
+    print("\n[5/6] Xây dựng ma trận tương tác, danh mục sản phẩm và test_truth:")
+    rng = np.random.default_rng(config.RANDOM_SEED)
+
+    # 1. interactions: n_purchases = số đơn hàng khác nhau có sản phẩm đó
+    interactions = train_df.group_by(["customer_id", "stockcode"]).agg(
+        pl.col("invoice").n_unique().cast(pl.Int32).alias("n_purchases"),
+        pl.col("quantity").sum().cast(pl.Int32).alias("quantity"),
     )
-    
-    # Lọc khách hàng có >= MIN_CUSTOMER_INVOICES hóa đơn trong train
-    cust_invoices = train_df.groupby("customer_id")["invoice"].nunique()
-    valid_customers = cust_invoices[cust_invoices >= config.MIN_CUSTOMER_INVOICES].index
-    
-    # Lọc sản phẩm có tổng lượt mua n_purchases >= MIN_PRODUCT_PURCHASES trong train
-    prod_purchases = interactions.groupby("stockcode")["n_purchases"].sum()
-    valid_products = prod_purchases[prod_purchases >= config.MIN_PRODUCT_PURCHASES].index
-    
-    interactions_filtered = interactions[
-        interactions["customer_id"].isin(valid_customers) &
-        interactions["stockcode"].isin(valid_products)
-    ].copy()
-    
     print(f"  Số tương tác ban đầu: {len(interactions):,}")
-    print(f"  Sau khi lọc (khách >= {config.MIN_CUSTOMER_INVOICES} đơn, SP >= {config.MIN_PRODUCT_PURCHASES} lượt): {len(interactions_filtered):,} tương tác")
-    print(f"  Gồm {interactions_filtered['customer_id'].nunique():,} khách hàng và {interactions_filtered['stockcode'].nunique():,} sản phẩm")
 
-    # 2. products.csv
-    # Tổng hợp danh mục sản phẩm từ clean_df (hoặc train_df) để đầy đủ thông tin
-    prod_canonical_desc = (
-        clean_df.groupby("stockcode")["description"].first().to_dict()
-    )
-    prod_total_purchases = (
-        clean_df.groupby("stockcode")["invoice"].nunique().to_dict()
-    )
-    
-    unique_stockcodes = sorted(clean_df["stockcode"].unique())
-    products_df = pd.DataFrame({
-        "stockcode": unique_stockcodes,
-        "description": [prod_canonical_desc.get(sc, "unknown product") for sc in unique_stockcodes],
-        "n_purchases": [prod_total_purchases.get(sc, 0) for sc in unique_stockcodes],
-        "image_path": ""  # fetch_images.py sẽ điền
-    })
-    products_df = products_df.sort_values("n_purchases", ascending=False).reset_index(drop=True)
-    print(f"  Tổng số sản phẩm trong products.csv: {len(products_df):,}")
+    # Khách đủ số đơn
+    cust_orders = train_df.group_by("customer_id").agg(pl.col("invoice").n_unique().alias("n_orders"))
+    valid_customers = cust_orders.filter(pl.col("n_orders") >= config.MIN_CUSTOMER_ORDERS)["customer_id"].to_numpy()
+    print(f"  Khách có >= {config.MIN_CUSTOMER_ORDERS} đơn: {len(valid_customers):,}")
 
-    # 3. test_truth
-    # Các cặp khách-sản phẩm mua trong test, chỉ giữ khách xuất hiện trong interactions_train
-    active_train_customers = set(interactions_filtered["customer_id"].unique())
-    test_truth = (
-        test_df[test_df["customer_id"].isin(active_train_customers)][["customer_id", "stockcode"]]
-        .drop_duplicates()
-        .copy()
-    )
-    print(f"  Số cặp test_truth (chỉ giữ khách có trong interactions_train): {len(test_truth):,} cặp, từ {test_truth['customer_id'].nunique():,} khách")
+    # Lấy ngẫu nhiên MAX_CUSTOMERS_RECSYS khách để huấn luyện mô hình gợi ý (giới hạn RAM)
+    if len(valid_customers) > config.MAX_CUSTOMERS_RECSYS:
+        valid_customers = rng.choice(valid_customers, size=config.MAX_CUSTOMERS_RECSYS, replace=False)
+        print(f"  Lấy ngẫu nhiên {config.MAX_CUSTOMERS_RECSYS:,} khách cho mô hình gợi ý")
 
-    return interactions_filtered, products_df, test_truth
+    # Sản phẩm phổ biến: đủ lượt mua và nằm trong top MAX_ITEMS_CF
+    prod_pop = (
+        interactions.group_by("stockcode")
+        .agg(pl.col("n_purchases").sum().alias("total"))
+        .filter(pl.col("total") >= config.MIN_ARTICLE_PURCHASES)
+        .sort("total", descending=True)
+        .head(config.MAX_ITEMS_CF)
+    )
+    valid_products = prod_pop["stockcode"].to_list()
+    print(f"  Sản phẩm giữ lại (>= {config.MIN_ARTICLE_PURCHASES} lượt, top {config.MAX_ITEMS_CF:,}): {len(valid_products):,}")
+
+    interactions_filtered = interactions.filter(
+        pl.col("customer_id").is_in(valid_customers) & pl.col("stockcode").is_in(valid_products)
+    )
+    print(f"  Sau khi lọc: {len(interactions_filtered):,} tương tác, "
+          f"{interactions_filtered['customer_id'].n_unique():,} khách, "
+          f"{interactions_filtered['stockcode'].n_unique():,} sản phẩm")
+
+    # 2. products.csv: mọi sản phẩm xuất hiện trong dữ liệu đã làm sạch
+    prod_counts = clean_df.group_by("stockcode").agg(pl.col("invoice").n_unique().cast(pl.Int32).alias("n_purchases"))
+    text_cols = [c for c in ["prod_name", "product_type_name", "product_group_name",
+                             "colour_group_name", "index_name", "garment_group_name", "detail_desc"]
+                 if c in articles.columns]
+    products = (
+        prod_counts.join(articles.rename({"article_id": "stockcode"}), on="stockcode", how="left")
+        .with_columns(
+            pl.col("prod_name").str.to_lowercase().alias("description"),
+            pl.concat_str([pl.col(c).fill_null("") for c in text_cols], separator=" ")
+              .str.to_lowercase().alias("content_text"),
+            pl.lit("").alias("image_path"),
+        )
+        .select(
+            "stockcode", "description", "n_purchases", "image_path",
+            *[c for c in ["product_type_name", "product_group_name", "colour_group_name"] if c in articles.columns],
+            "content_text",
+        )
+        .sort("n_purchases", descending=True)
+    )
+    print(f"  Tổng số sản phẩm trong products.csv: {len(products):,}")
+
+    # 3. test_truth: lấy mẫu EVAL_SAMPLE_CUSTOMERS khách (có trong interactions và có mua trong test)
+    train_custs = interactions_filtered["customer_id"].unique().to_list()
+    test_pairs = (
+        test_df.filter(pl.col("customer_id").is_in(train_custs))
+        .select("customer_id", "stockcode")
+        .unique()
+    )
+    test_custs = test_pairs["customer_id"].unique().to_numpy()
+    if len(test_custs) > config.EVAL_SAMPLE_CUSTOMERS:
+        test_custs = rng.choice(test_custs, size=config.EVAL_SAMPLE_CUSTOMERS, replace=False)
+    test_truth = test_pairs.filter(pl.col("customer_id").is_in(test_custs)).sort("customer_id")
+    print(f"  Số cặp test_truth: {len(test_truth):,} cặp, từ {test_truth['customer_id'].n_unique():,} khách (lấy mẫu)")
+
+    return interactions_filtered.sort(["customer_id", "stockcode"]), products, test_truth
+
+
+# =========================================================
+# [6/6] HỒ SƠ KHÁCH HÀNG
+# =========================================================
+def build_customers(id_map: pl.DataFrame) -> pl.DataFrame:
+    print("\n[6/6] Chuẩn bị hồ sơ khách hàng (tuổi, hạng thành viên):")
+    if not config.CUSTOMERS_RAW_PATH.exists():
+        print("  Không có customers.csv -> bỏ qua")
+        return pl.DataFrame()
+    cust = pl.read_csv(config.CUSTOMERS_RAW_PATH, infer_schema_length=10_000)
+    keep = [c for c in ["customer_id", "age", "club_member_status", "fashion_news_frequency"] if c in cust.columns]
+    cust = (
+        cust.select(keep)
+        .join(id_map, left_on="customer_id", right_on="customer_hash", how="inner")
+        .drop("customer_id")
+        .rename({"customer_id_right": "customer_id"})
+        .select("customer_id", *[c for c in keep if c != "customer_id"])
+        .sort("customer_id")
+    )
+    print(f"  Số khách có hồ sơ: {len(cust):,}")
+    return cust
 
 
 def main():
-    total_start_t = time.time()
+    t0 = time.time()
     print("=" * 60)
-    print("BẮT ĐẦU QUÁ TRÌNH TIỀN XỬ LÝ DỮ LIỆU ONLINE RETAIL")
+    print("BẮT ĐẦU TIỀN XỬ LÝ DỮ LIỆU H&M")
     print("=" * 60)
-    
     config.PROCESSED_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    
-    # 1. Đọc và chuẩn hóa schema
-    raw_path = find_raw_data_file()
-    df_raw = load_and_standardize_schema(raw_path)
-    
-    # 2. Làm sạch
-    clean_df = clean_transactions(df_raw)
-    clean_df.to_parquet(config.TRANSACTIONS_CLEAN_PATH, index=False)
+
+    convert_transactions_to_parquet()
+    articles = load_articles()
+    print(f"  articles.csv: {len(articles):,} sản phẩm")
+
+    clean_df, id_map = clean_transactions(articles)
+    clean_df.write_parquet(config.TRANSACTIONS_CLEAN_PATH)
+    id_map.write_parquet(config.CUSTOMER_ID_MAP_PATH)
     print(f"-> Đã lưu: {config.TRANSACTIONS_CLEAN_PATH}")
-    
-    # 3. Chia train / test
+
     train_df, test_df = split_train_test(clean_df)
-    train_df.to_parquet(config.TRAIN_DATA_PATH, index=False)
-    test_df.to_parquet(config.TEST_DATA_PATH, index=False)
+    train_df.write_parquet(config.TRAIN_DATA_PATH)
+    test_df.write_parquet(config.TEST_DATA_PATH)
     print(f"-> Đã lưu: {config.TRAIN_DATA_PATH}")
     print(f"-> Đã lưu: {config.TEST_DATA_PATH}")
-    
-    # 4. Tính RFM trên train
-    rfm_train = compute_rfm_train(train_df)
-    rfm_train.to_parquet(config.RFM_TRAIN_PATH, index=False)
+
+    rfm = compute_rfm_train(train_df)
+    rfm.write_parquet(config.RFM_TRAIN_PATH)
     print(f"-> Đã lưu: {config.RFM_TRAIN_PATH}")
-    
-    # 5. Xây dựng interactions, products và test_truth
-    interactions_train, products_df, test_truth = build_interactions_and_products(
-        clean_df, train_df, test_df
-    )
-    interactions_train.to_parquet(config.INTERACTIONS_TRAIN_PATH, index=False)
-    products_df.to_csv(config.PRODUCTS_PATH, index=False)
-    test_truth.to_parquet(config.TEST_TRUTH_PATH, index=False)
-    
+
+    interactions, products, test_truth = build_interactions_and_products(clean_df, train_df, test_df, articles)
+    interactions.write_parquet(config.INTERACTIONS_TRAIN_PATH)
+    products.write_csv(config.PRODUCTS_PATH)
+    test_truth.write_parquet(config.TEST_TRUTH_PATH)
     print(f"-> Đã lưu: {config.INTERACTIONS_TRAIN_PATH}")
     print(f"-> Đã lưu: {config.PRODUCTS_PATH}")
     print(f"-> Đã lưu: {config.TEST_TRUTH_PATH}")
-    
+
+    customers = build_customers(id_map)
+    if len(customers):
+        customers.write_parquet(config.CUSTOMERS_PATH)
+        print(f"-> Đã lưu: {config.CUSTOMERS_PATH}")
+
     print("=" * 60)
-    print(f"TIỀN XỬ LÝ HOÀN THÀNH THÀNH CÔNG trong {time.time() - total_start_t:.2f} giây!")
+    print(f"TIỀN XỬ LÝ HOÀN THÀNH trong {time.time() - t0:.1f} giây!")
     print("=" * 60)
 
 
 if __name__ == "__main__":
     main()
+    

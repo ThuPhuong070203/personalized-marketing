@@ -1,374 +1,263 @@
-import React, { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useState, useEffect } from 'react';
 import { api } from '../api';
-import ClusterScatter, { CLUSTER_COLORS, getClusterColor } from '../components/ClusterScatter';
 import LoadingSpinner from '../components/LoadingSpinner';
-import StatCard from '../components/StatCard';
-import ProductCard from '../components/ProductCard';
 import {
-  Users,
-  PieChart,
-  AlertTriangle,
-  Crown,
-  Sparkles,
-  ShoppingBag,
-  X,
-  TrendingUp,
-  Award,
-  ArrowRight,
-  ShieldAlert,
-  Flame,
-  UserCheck
-} from 'lucide-react';
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  Tooltip,
+  ResponsiveContainer,
+  Legend,
+  CartesianGrid,
+} from 'recharts';
+import { Award, BarChart2, PieChart, Layers, CheckCircle2, TrendingUp, Info } from 'lucide-react';
 
-export default function Overview() {
-  const navigate = useNavigate();
-  const [clusters, setClusters] = useState([]);
-  const [points, setPoints] = useState([]);
+const MODEL_LABELS = {
+  popularity: 'Popularity',
+  cluster_popularity: 'Cluster Popularity',
+  item_cf: 'Item-CF',
+  als: 'ALS (Implicit)',
+  content: 'Content-Based',
+  hybrid: 'Hybrid (Đề xuất)',
+};
+
+export default function Metrics() {
+  const [metrics, setMetrics] = useState(null);
+  const [selectedK, setSelectedK] = useState(10);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  // Chi tiết cụm đã chọn (kèm top 10 sản phẩm)
-  const [selectedClusterDetail, setSelectedClusterDetail] = useState(null);
-  const [loadingClusterDetail, setLoadingClusterDetail] = useState(false);
-
   useEffect(() => {
-    async function fetchData() {
+    async function fetchMetrics() {
       try {
         setLoading(true);
-        const [clustersData, pointsData] = await Promise.all([
-          api.getClusters(),
-          api.getClusterPoints(),
-        ]);
-        setClusters(clustersData);
-        setPoints(pointsData);
+        const data = await api.getMetrics();
+        setMetrics(data);
       } catch (err) {
-        setError(err.message || 'Không thể tải dữ liệu phân cụm.');
+        setError(err.message || 'Không thể nạp dữ liệu đánh giá mô hình');
       } finally {
         setLoading(false);
       }
     }
-    fetchData();
+    fetchMetrics();
   }, []);
 
-  const handleViewClusterDetail = async (clusterId) => {
-    try {
-      setLoadingClusterDetail(true);
-      const detail = await api.getCluster(clusterId);
-      setSelectedClusterDetail(detail);
-    } catch (err) {
-      alert(`Lỗi khi lấy chi tiết cụm: ${err.message}`);
-    } finally {
-      setLoadingClusterDetail(false);
-    }
-  };
+  if (loading) return <LoadingSpinner text="Đang tải dữ liệu đánh giá mô hình..." />;
+  if (error) return <div className="error-banner">{error}</div>;
+  if (!metrics) return null;
 
-  if (loading) return <LoadingSpinner text="Đang phân tích đặc trưng RFM và phân cụm K-Means..." />;
-  if (error) return <div className="error-banner"><AlertTriangle size={20} /> {error}</div>;
+  const clustering = metrics.clustering || {};
+  const recommenders = metrics.recommenders || {};
 
-  const totalCustomers = clusters.reduce((acc, c) => acc + c.size, 0);
-  const vipCluster = clusters.find((c) => c.name.includes('VIP')) || clusters[1];
-  const atRiskCluster = clusters.find((c) => c.name.includes('nguy cơ') || c.name.includes('bỏ')) || clusters[0];
-  const loyalCluster = clusters.find((c) => c.name.includes('trung thành')) || clusters[2];
+  // Chuẩn bị dữ liệu cho biểu đồ so sánh Recharts
+  const chartData = Object.entries(recommenders).map(([key, scores]) => {
+    return {
+      model: MODEL_LABELS[key] || key,
+      precision: Math.round((scores[`precision@${selectedK}`] || 0) * 1000) / 10,
+      recall: Math.round((scores[`recall@${selectedK}`] || 0) * 1000) / 10,
+      map: Math.round((scores[`map@${selectedK}`] || 0) * 1000) / 10,
+      ndcg: Math.round((scores[`ndcg@${selectedK}`] || 0) * 1000) / 10,
+      coverage: Math.round((scores[`coverage@${selectedK}`] || 0) * 1000) / 10,
+    };
+  });
 
-  const getBadgeClass = (name) => {
-    if (!name) return 'badge-neutral';
-    if (name.includes('nguy cơ') || name.includes('bỏ')) return 'badge-risk';
-    if (name.includes('VIP')) return 'badge-vip';
-    if (name.includes('trung thành')) return 'badge-loyal';
-    if (name.includes('mới')) return 'badge-new';
-    return 'badge-neutral';
-  };
-
-  const getClusterIcon = (name) => {
-    if (name.includes('VIP')) return <Crown size={20} color="#10b981" />;
-    if (name.includes('trung thành')) return <Award size={20} color="#818cf8" />;
-    if (name.includes('mới')) return <Sparkles size={20} color="#06b6d4" />;
-    if (name.includes('nguy cơ') || name.includes('bỏ')) return <ShieldAlert size={20} color="#f43f5e" />;
-    return <Users size={20} color="#94a3b8" />;
+  // Tìm giá trị cao nhất cho từng chỉ số để highlight
+  const maxValues = {
+    precision: Math.max(...Object.values(recommenders).map((s) => s[`precision@${selectedK}`] || 0)),
+    recall: Math.max(...Object.values(recommenders).map((s) => s[`recall@${selectedK}`] || 0)),
+    map: Math.max(...Object.values(recommenders).map((s) => s[`map@${selectedK}`] || 0)),
+    ndcg: Math.max(...Object.values(recommenders).map((s) => s[`ndcg@${selectedK}`] || 0)),
+    coverage: Math.max(...Object.values(recommenders).map((s) => s[`coverage@${selectedK}`] || 0)),
   };
 
   return (
     <div>
       <div className="page-header">
-        <div className="page-badge">
-          <Sparkles size={14} />
-          <span>Big Data Analytics • RFM Segmentation</span>
-        </div>
-        <h1 className="page-title">Phân Cụm Khách Hàng & Chiến Lược Tiếp Thị</h1>
+        <h1 className="page-title">Đánh Giá & So Sánh Mô Hình</h1>
         <p className="page-desc">
-          Ứng dụng học máy K-Means trên không gian đặc trưng RFM (Recency, Frequency, Monetary) kết hợp chuẩn hóa phi tuyến log1p, giúp định vị chính xác chân dung và xây dựng chiến dịch cá nhân hóa.
+          Bảng chỉ số định lượng đánh giá phân cụm K-Means và hiệu năng thực nghiệm của 6 mô hình gợi ý sản phẩm trên tập Test độc lập (28 ngày cuối của bộ dữ liệu H&M).
         </p>
       </div>
 
-      {/* 4 Thẻ thống kê tổng quan */}
-      <div className="stat-grid">
-        <StatCard
-          title="Tổng Khách Hàng (Train)"
-          value={totalCustomers.toLocaleString()}
-          icon={<Users size={26} />}
-          color="#818cf8"
-          subtitle="Dữ liệu làm sạch Online Retail II"
-        />
-        <StatCard
-          title="Khách Hàng VIP"
-          value={`${vipCluster ? vipCluster.size.toLocaleString() : 0}`}
-          icon={<Crown size={26} />}
-          color="#10b981"
-          subtitle={`Chi tiêu TB: £${vipCluster ? Math.round(vipCluster.mean_monetary).toLocaleString() : 0} / khách`}
-        />
-        <StatCard
-          title="Khách Trung Thành"
-          value={`${loyalCluster ? loyalCluster.size.toLocaleString() : 0}`}
-          icon={<Flame size={26} />}
-          color="#06b6d4"
-          subtitle={`Tần suất: ${loyalCluster ? loyalCluster.mean_frequency : 0} đơn / khách`}
-        />
-        <StatCard
-          title="Nguy Cơ Rời Bỏ (At-Risk)"
-          value={`${atRiskCluster ? atRiskCluster.size.toLocaleString() : 0}`}
-          icon={<ShieldAlert size={26} />}
-          color="#f43f5e"
-          subtitle={`Chưa mua lại TB: ${atRiskCluster ? Math.round(atRiskCluster.mean_recency) : 0} ngày`}
-        />
-      </div>
+      {/* 1. Phần đánh giá phân cụm */}
+      <div className="glass-card" style={{ marginBottom: '2rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '1rem' }}>
+          <PieChart size={22} color="var(--primary-light)" />
+          <h2 style={{ fontSize: '1.25rem', fontWeight: 700 }}>Chỉ Số Đánh Giá Phân Cụm (K-Means)</h2>
+        </div>
 
-      {/* 4 Thẻ hồ sơ phân cụm dạng Grid */}
-      <div style={{ marginBottom: '2.5rem' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
-          <div>
-            <h2 style={{ fontSize: '1.35rem', fontWeight: 800, color: '#fff' }}>
-              Chân Dung 4 Phân Khúc Khách Hàng
-            </h2>
-            <p style={{ fontSize: '0.875rem', color: 'var(--text-muted)' }}>
-              Đặc điểm hành vi mua sắm và đề xuất chiến dịch Marketing riêng biệt
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem', marginBottom: '1rem' }}>
+          <div style={{ background: 'rgba(255, 255, 255, 0.02)', border: '1px solid var(--border-card)', padding: '1.25rem', borderRadius: '12px' }}>
+            <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>SỐ CỤM TỐI ƯU (K)</span>
+            <div style={{ fontSize: '1.8rem', fontWeight: 800, color: 'var(--text-main)', marginTop: '4px' }}>
+              {clustering.k || 4}
+            </div>
+            <p style={{ fontSize: '0.75rem', color: 'var(--text-dim)', marginTop: '4px' }}>
+              Dựa trên phương pháp Elbow và Silhouette
+            </p>
+          </div>
+
+          <div style={{ background: 'rgba(255, 255, 255, 0.02)', border: '1px solid var(--border-card)', padding: '1.25rem', borderRadius: '12px' }}>
+            <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>SILHOUETTE SCORE</span>
+            <div style={{ fontSize: '1.8rem', fontWeight: 800, color: '#38bdf8', marginTop: '4px' }}>
+              {clustering.silhouette !== undefined ? clustering.silhouette.toFixed(4) : 'N/A'}
+            </div>
+            <p style={{ fontSize: '0.75rem', color: 'var(--text-dim)', marginTop: '4px' }}>
+              Dải [-1, 1] • Điểm dương cao thể hiện các cụm phân tách rõ ràng
+            </p>
+          </div>
+
+          <div style={{ background: 'rgba(255, 255, 255, 0.02)', border: '1px solid var(--border-card)', padding: '1.25rem', borderRadius: '12px' }}>
+            <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>DAVIES-BOULDIN INDEX</span>
+            <div style={{ fontSize: '1.8rem', fontWeight: 800, color: '#10b981', marginTop: '4px' }}>
+              {clustering.davies_bouldin !== undefined ? clustering.davies_bouldin.toFixed(4) : 'N/A'}
+            </div>
+            <p style={{ fontSize: '0.75rem', color: 'var(--text-dim)', marginTop: '4px' }}>
+              Càng nhỏ càng tốt • Thước đo độ tương đồng nội cụm
+            </p>
+          </div>
+
+          <div style={{ background: 'rgba(255, 255, 255, 0.02)', border: '1px solid var(--border-card)', padding: '1.25rem', borderRadius: '12px' }}>
+            <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>CALINSKI-HARABASZ</span>
+            <div style={{ fontSize: '1.8rem', fontWeight: 800, color: '#a855f7', marginTop: '4px' }}>
+              {clustering.calinski_harabasz !== undefined ? clustering.calinski_harabasz.toLocaleString() : 'N/A'}
+            </div>
+            <p style={{ fontSize: '0.75rem', color: 'var(--text-dim)', marginTop: '4px' }}>
+              Variance Ratio Criterion • Giá trị cao khẳng định cụm chặt chẽ
             </p>
           </div>
         </div>
+      </div>
 
-        <div className="cluster-card-grid">
-          {clusters.map((c) => {
-            const color = CLUSTER_COLORS[c.id] || '#94a3b8';
-            return (
-              <div
-                key={c.id}
-                className="cluster-card"
-                style={{
-                  borderTop: `3px solid ${color}`,
-                  background: `linear-gradient(180deg, ${color}08 0%, var(--bg-card) 40%)`
-                }}
+      {/* 2. Phần so sánh hiệu năng Recommenders */}
+      <div className="glass-card" style={{ marginBottom: '2rem' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem', marginBottom: '1.5rem' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+            <Award size={22} color="var(--primary-light)" />
+            <div>
+              <h2 style={{ fontSize: '1.25rem', fontWeight: 700 }}>So Sánh 6 Thuật Toán Gợi Ý Sản Phẩm</h2>
+              <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+                Đánh giá theo Top-K trên 10.000 khách lấy mẫu có mua hàng trong tập Test
+              </p>
+            </div>
+          </div>
+
+          {/* Nút chọn K = 5, 10, 20 */}
+          <div style={{ display: 'flex', gap: '0.5rem', background: 'rgba(0,0,0,0.3)', padding: '4px', borderRadius: '8px', border: '1px solid var(--border-card)' }}>
+            {[5, 10, 20].map((k) => (
+              <button
+                key={k}
+                type="button"
+                className={`btn ${selectedK === k ? 'btn-primary' : 'btn-secondary'}`}
+                style={{ padding: '0.4rem 0.9rem', fontSize: '0.85rem' }}
+                onClick={() => setSelectedK(k)}
               >
-                <div className="cluster-card-header">
-                  <div className="cluster-name-title">
-                    {getClusterIcon(c.name)}
-                    <span>{c.name}</span>
-                  </div>
-                  <span className={`badge ${getBadgeClass(c.name)}`}>
-                    {c.pct}% quy mô
-                  </span>
-                </div>
-
-                <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: '1rem', minHeight: '40px' }}>
-                  {c.description}
-                </div>
-
-                <div className="cluster-metrics-row">
-                  <div className="cluster-metric-item">
-                    <div className="cluster-metric-label">Recency</div>
-                    <div className="cluster-metric-val">{Math.round(c.mean_recency)} <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)' }}>ngày</span></div>
-                  </div>
-                  <div className="cluster-metric-item">
-                    <div className="cluster-metric-label">Frequency</div>
-                    <div className="cluster-metric-val">{c.mean_frequency} <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)' }}>đơn</span></div>
-                  </div>
-                  <div className="cluster-metric-item">
-                    <div className="cluster-metric-label">Monetary</div>
-                    <div className="cluster-metric-val" style={{ color: '#10b981' }}>£{Math.round(c.mean_monetary).toLocaleString()}</div>
-                  </div>
-                </div>
-
-                <div className="cluster-campaign-box">
-                  <div style={{ fontSize: '0.75rem', fontWeight: 700, color: color, textTransform: 'uppercase', marginBottom: '4px' }}>
-                    Chiến dịch Marketing:
-                  </div>
-                  <div style={{ color: 'var(--text-main)', lineHeight: 1.4 }}>
-                    {c.campaign}
-                  </div>
-                </div>
-
-                <div style={{ marginTop: '1.25rem', display: 'flex', gap: '0.6rem' }}>
-                  <button
-                    className="btn btn-secondary"
-                    style={{ flex: 1, padding: '0.55rem', fontSize: '0.825rem' }}
-                    onClick={() => handleViewClusterDetail(c.id)}
-                  >
-                    <ShoppingBag size={15} />
-                    <span>Top 10 Sản Phẩm</span>
-                  </button>
-                  <button
-                    className="btn btn-primary"
-                    style={{ padding: '0.55rem 0.85rem', fontSize: '0.825rem' }}
-                    onClick={() => navigate('/customers')}
-                    title="Xem danh sách khách hàng"
-                  >
-                    <Users size={15} />
-                  </button>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Biểu đồ PCA Scatter 2D cao cấp */}
-      <div className="glass-card" style={{ marginBottom: '2.5rem' }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.25rem', flexWrap: 'wrap', gap: '1rem' }}>
-          <div>
-            <h3 style={{ fontSize: '1.3rem', fontWeight: 800 }}>Không Gian Phân Cụm 2D (PCA)</h3>
-            <p style={{ fontSize: '0.875rem', color: 'var(--text-muted)' }}>
-              Phân bố {points.length} khách hàng mẫu từ ma trận đặc trưng RFM đã giảm chiều bằng PCA.
-            </p>
-          </div>
-          <div style={{ display: 'flex', gap: '0.6rem', flexWrap: 'wrap' }}>
-            {clusters.map((c) => (
-              <span key={c.id} className={`badge ${getBadgeClass(c.name)}`}>
-                ● {c.name} ({c.pct}%)
-              </span>
+                K = {k}
+              </button>
             ))}
           </div>
         </div>
 
-        <ClusterScatter
-          points={points}
-          clusterProfiles={clusters}
-          onSelectCustomer={(cid) => navigate(`/recommend?customer_id=${cid}`)}
-        />
-      </div>
-
-      {/* Bảng hồ sơ chi tiết các cụm */}
-      <div className="glass-card">
-        <h3 style={{ fontSize: '1.25rem', fontWeight: 800, marginBottom: '0.5rem' }}>
-          Bảng So Sánh Chỉ Số RFM Giữa Các Phân Khúc
-        </h3>
-        <p style={{ fontSize: '0.875rem', color: 'var(--text-muted)', marginBottom: '1.5rem' }}>
-          Dữ liệu định lượng phục vụ báo cáo đồ án Big Data
-        </p>
-
-        <div className="table-wrapper">
+        {/* Bảng so sánh chỉ số */}
+        <div className="table-wrapper" style={{ marginBottom: '2rem' }}>
           <table className="modern-table">
             <thead>
               <tr>
-                <th>Cụm Phân Khúc</th>
-                <th>Số Lượng Khách</th>
-                <th>Tỷ Lệ</th>
-                <th>Recency TB (Ngày)</th>
-                <th>Frequency TB (Đơn)</th>
-                <th>Monetary TB (£)</th>
-                <th>Hành Động Marketing Đề Xuất</th>
-                <th>Thao Tác</th>
+                <th>Thuật Toán</th>
+                <th>Precision@{selectedK}</th>
+                <th>Recall@{selectedK}</th>
+                <th>MAP@{selectedK}</th>
+                <th>NDCG@{selectedK}</th>
+                <th>Coverage@{selectedK}</th>
+                <th>Đánh Giá Đặc Trưng</th>
               </tr>
             </thead>
             <tbody>
-              {clusters.map((c) => (
-                <tr key={c.id}>
-                  <td>
-                    <span className={`badge ${getBadgeClass(c.name)}`}>
-                      ● {c.name}
-                    </span>
-                  </td>
-                  <td style={{ fontWeight: 700 }}>{c.size.toLocaleString()}</td>
-                  <td style={{ fontWeight: 600 }}>{c.pct}%</td>
-                  <td>{c.mean_recency}</td>
-                  <td>{c.mean_frequency}</td>
-                  <td style={{ color: '#10b981', fontWeight: 700 }}>
-                    £{c.mean_monetary.toLocaleString()}
-                  </td>
-                  <td style={{ maxWidth: '340px', fontSize: '0.85rem' }}>
-                    <div style={{ color: 'var(--text-main)', fontWeight: 600, marginBottom: '2px' }}>{c.campaign}</div>
-                    <div style={{ color: 'var(--text-dim)', fontSize: '0.78rem' }}>{c.description}</div>
-                  </td>
-                  <td>
-                    <button
-                      className="btn btn-secondary"
-                      style={{ padding: '0.45rem 0.85rem', fontSize: '0.8rem' }}
-                      onClick={() => handleViewClusterDetail(c.id)}
-                    >
-                      <ShoppingBag size={14} />
-                      Top SP
-                    </button>
-                  </td>
-                </tr>
-              ))}
+              {Object.entries(recommenders).map(([key, scores]) => {
+                const isHybrid = key === 'hybrid';
+                const p = scores[`precision@${selectedK}`] || 0;
+                const r = scores[`recall@${selectedK}`] || 0;
+                const m = scores[`map@${selectedK}`] || 0;
+                const n = scores[`ndcg@${selectedK}`] || 0;
+                const cov = scores[`coverage@${selectedK}`] || 0;
+
+                return (
+                  <tr
+                    key={key}
+                    style={{
+                      background: isHybrid ? 'rgba(99, 102, 241, 0.08)' : undefined,
+                      borderLeft: isHybrid ? '3px solid var(--primary)' : '3px solid transparent',
+                    }}
+                  >
+                    <td>
+                      <div style={{ fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                        <span>{MODEL_LABELS[key] || key}</span>
+                        {isHybrid && <span className="badge badge-loyal" style={{ fontSize: '0.7rem' }}>Tốt nhất</span>}
+                      </div>
+                    </td>
+                    <td style={{ fontWeight: p === maxValues.precision ? 800 : 500, color: p === maxValues.precision ? '#34d399' : undefined }}>
+                      {(p * 100).toFixed(2)}% {p === maxValues.precision && '★'}
+                    </td>
+                    <td style={{ fontWeight: r === maxValues.recall ? 800 : 500, color: r === maxValues.recall ? '#34d399' : undefined }}>
+                      {(r * 100).toFixed(2)}% {r === maxValues.recall && '★'}
+                    </td>
+                    <td style={{ fontWeight: m === maxValues.map ? 800 : 500, color: m === maxValues.map ? '#34d399' : undefined }}>
+                      {(m * 100).toFixed(2)}% {m === maxValues.map && '★'}
+                    </td>
+                    <td style={{ fontWeight: n === maxValues.ndcg ? 800 : 500, color: n === maxValues.ndcg ? '#34d399' : undefined }}>
+                      {(n * 100).toFixed(2)}% {n === maxValues.ndcg && '★'}
+                    </td>
+                    <td style={{ fontWeight: cov === maxValues.coverage ? 800 : 500, color: cov === maxValues.coverage ? '#38bdf8' : undefined }}>
+                      {(cov * 100).toFixed(2)}% {cov === maxValues.coverage && '★'}
+                    </td>
+                    <td style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                      {key === 'hybrid' && 'Cân bằng tốt nhất: MAP & NDCG cao nhất, Coverage rộng hơn ALS.'}
+                      {key === 'item_cf' && 'Gợi ý gần như toàn bộ danh mục nhưng kém chính xác hơn ALS.'}
+                      {key === 'als' && 'Precision & Recall cao nhất nhờ học sở thích ẩn.'}
+                      {key === 'content' && 'Bao phủ rộng nhưng chỉ dựa vào mô tả nên kém chính xác.'}
+                      {key === 'cluster_popularity' && 'Bán chạy theo phân khúc RFM, gần như Popularity.'}
+                      {key === 'popularity' && 'Baseline cho khách cold-start.'}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
-      </div>
 
-      {/* Modal Popup xem Top 10 sản phẩm bán chạy nhất trong cụm */}
-      {selectedClusterDetail && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(0, 0, 0, 0.8)',
-            backdropFilter: 'blur(10px)',
-            zIndex: 100,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            padding: '1.5rem',
-          }}
-          onClick={() => setSelectedClusterDetail(null)}
-        >
-          <div
-            className="glass-card"
-            style={{
-              maxWidth: '1000px',
-              width: '100%',
-              maxHeight: '90vh',
-              overflowY: 'auto',
-              background: '#0d1322',
-              border: '1px solid rgba(255, 255, 255, 0.15)',
-              boxShadow: '0 25px 60px rgba(0,0,0,0.7)'
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1.5rem' }}>
-              <div>
-                <span className={`badge ${getBadgeClass(selectedClusterDetail.cluster.name)}`} style={{ marginBottom: '8px' }}>
-                  {selectedClusterDetail.cluster.name}
-                </span>
-                <h3 style={{ fontSize: '1.45rem', fontWeight: 800 }}>
-                  Top 10 Sản Phẩm Bán Chạy Nhất Phân Khúc Này
-                </h3>
-                <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginTop: '4px' }}>
-                  {selectedClusterDetail.cluster.campaign}
-                </p>
-              </div>
-              <button
-                className="btn btn-secondary"
-                style={{ padding: '0.5rem', borderRadius: '50%' }}
-                onClick={() => setSelectedClusterDetail(null)}
-              >
-                <X size={20} />
-              </button>
-            </div>
+        {/* Biểu đồ Recharts so sánh trực quan */}
+        <div>
+          <h4 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+            <BarChart2 size={18} color="var(--primary-light)" />
+            <span>Biểu Đồ So Sánh Precision, Recall, NDCG & MAP (%) tại K = {selectedK}</span>
+          </h4>
 
-            <div className="product-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(185px, 1fr))' }}>
-              {selectedClusterDetail.top_products.map((p, idx) => (
-                <ProductCard
-                  key={p.stockcode}
-                  stockcode={p.stockcode}
-                  description={p.description}
-                  score={p.score}
-                  image={p.image}
-                  rank={idx + 1}
+          <div style={{ width: '100%', height: 350 }}>
+            <ResponsiveContainer>
+              <BarChart data={chartData} margin={{ top: 20, right: 30, left: 10, bottom: 20 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+                <XAxis dataKey="model" tick={{ fill: '#94a3b8', fontSize: 12 }} />
+                <YAxis unit="%" tick={{ fill: '#94a3b8', fontSize: 12 }} />
+                <Tooltip
+                  contentStyle={{
+                    background: '#0f172a',
+                    border: '1px solid rgba(255, 255, 255, 0.1)',
+                    borderRadius: '8px',
+                    fontSize: '0.85rem'
+                  }}
+                  formatter={(val) => [`${val}%`, '']}
                 />
-              ))}
-            </div>
+                <Legend wrapperStyle={{ paddingTop: '10px' }} />
+                <Bar dataKey="precision" name="Precision" fill="#818cf8" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="recall" name="Recall" fill="#34d399" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="ndcg" name="NDCG" fill="#38bdf8" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="map" name="MAP" fill="#f59e0b" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
           </div>
         </div>
-      )}
+      </div>
     </div>
   );
-}
+} 

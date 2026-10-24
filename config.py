@@ -1,5 +1,5 @@
 """
-Cấu hình tập trung cho toàn bộ dự án Personalized Marketing.
+Cấu hình tập trung cho toàn bộ dự án Personalized Marketing (bộ dữ liệu H&M).
 Mọi hằng số, đường dẫn, siêu tham số và random seed được định nghĩa tại đây.
 """
 
@@ -35,14 +35,15 @@ IMAGES_DIR: Path = DATA_DIR / "images"
 BACKEND_DIR: Path = PROJECT_ROOT / "backend"
 MODELS_DIR: Path = BACKEND_DIR / "models"
 
-# File dữ liệu thô
-RAW_DATA_PATH: Path = RAW_DATA_DIR / "online_retail_cleaned.csv"
-# Dự phòng nếu file thô ở tên khác
-FALLBACK_RAW_DATA_PATHS = [
-    RAW_DATA_DIR / "online_retail.csv",
-    DATA_DIR / "online_retail_cleaned.csv",
-    DATA_DIR / "online_retail.csv",
-]
+# Dữ liệu thô H&M (tải bằng data_processing/download_hm.py, không đưa lên GitHub)
+KAGGLE_COMPETITION: str = "h-and-m-personalized-fashion-recommendations"
+HM_RAW_DIR: Path = RAW_DATA_DIR / "hm"
+TRANSACTIONS_RAW_PATH: Path = HM_RAW_DIR / "transactions_train.csv"
+ARTICLES_RAW_PATH: Path = HM_RAW_DIR / "articles.csv"
+CUSTOMERS_RAW_PATH: Path = HM_RAW_DIR / "customers.csv"
+
+# Bản Parquet của dữ liệu thô (đọc nhanh hơn CSV hàng chục lần)
+TRANSACTIONS_RAW_PARQUET: Path = HM_RAW_DIR / "transactions_train.parquet"
 
 # File dữ liệu sau xử lý
 TRANSACTIONS_CLEAN_PATH: Path = PROCESSED_DATA_DIR / "transactions_clean.parquet"
@@ -51,7 +52,11 @@ TEST_DATA_PATH: Path = PROCESSED_DATA_DIR / "test.parquet"
 RFM_TRAIN_PATH: Path = PROCESSED_DATA_DIR / "rfm_train.parquet"
 INTERACTIONS_TRAIN_PATH: Path = PROCESSED_DATA_DIR / "interactions_train.parquet"
 PRODUCTS_PATH: Path = PROCESSED_DATA_DIR / "products.csv"
+CUSTOMERS_PATH: Path = PROCESSED_DATA_DIR / "customers.parquet"
 TEST_TRUTH_PATH: Path = PROCESSED_DATA_DIR / "test_truth.parquet"
+
+# Bảng đổi customer_id (chuỗi hash 64 ký tự của H&M) sang số nguyên ngắn để API/web dùng
+CUSTOMER_ID_MAP_PATH: Path = PROCESSED_DATA_DIR / "customer_id_map.parquet"
 
 # File ảnh placeholder
 PLACEHOLDER_IMAGE_PATH: Path = IMAGES_DIR / "placeholder.jpg"
@@ -68,26 +73,37 @@ METRICS_PATH: Path = MODELS_DIR / "metrics.json"
 # ---------------------------------------------------------
 # THAM SỐ XỬ LÝ DỮ LIỆU
 # ---------------------------------------------------------
+# Chỉ dùng dữ liệu từ ngày này trở đi (toàn bộ: 2018-09-20 → 2020-09-22).
+# Mặc định lấy 1 năm gần nhất để vừa RAM laptop; đặt None để dùng toàn bộ 2 năm.
+DATA_START_DATE: str | None = "2019-09-23"
+
 # Số ngày cuối cùng làm tập test (theo thời gian)
-TEST_DAYS: int = 60
+TEST_DAYS: int = 28
 
-# Ngưỡng lọc ma trận tương tác
-MIN_CUSTOMER_INVOICES: int = 2
-MIN_PRODUCT_PURCHASES: int = 5
+# Một "đơn hàng" = toàn bộ món một khách mua trong cùng một ngày
+# (H&M không có mã hóa đơn).
+MIN_CUSTOMER_ORDERS: int = 2       # khách cần ít nhất N đơn để vào ma trận tương tác
+MIN_ARTICLE_PURCHASES: int = 20    # sản phẩm cần ít nhất N lượt mua
 
-# Mã stockcode không phải sản phẩm thông thường
-NON_PRODUCT_CODES: set = {
-    "POST", "D", "M", "DOT", "CRUK",
-    "BANK CHARGES", "AMAZONFEE", "S", "B"
-}
-NON_PRODUCT_PREFIXES: tuple = ("GIFT_", "TEST")
+# Giới hạn số sản phẩm cho các mô hình gợi ý.
+# Item-CF lưu ma trận tương đồng đầy đủ n_items × n_items (float64):
+#   10.000 sản phẩm ≈ 0,8 GB RAM; 20.000 sản phẩm ≈ 3,2 GB RAM.
+MAX_ITEMS_CF: int = 10_000
+
+# Số khách dùng để huấn luyện mô hình gợi ý (lấy ngẫu nhiên trong số khách có ≥ MIN_CUSTOMER_ORDERS đơn).
+# Content-Based lưu 1 vector 1.000 chiều cho mỗi khách: 50.000 khách ≈ 0,4 GB RAM.
+# Phân cụm RFM vẫn chạy trên TOÀN BỘ khách.
+MAX_CUSTOMERS_RECSYS: int = 50_000
+
+# Số khách lấy mẫu để đánh giá mô hình (đánh giá cả triệu khách sẽ rất lâu)
+EVAL_SAMPLE_CUSTOMERS: int = 10_000
 
 # ---------------------------------------------------------
-# THAM SỐ GÁN ẢNH (FETCH IMAGES)
+# THAM SỐ ẢNH SẢN PHẨM
 # ---------------------------------------------------------
-TOP_N_IMAGES: int = 500
+# Ảnh thật của H&M: chỉ tải ảnh của N sản phẩm bán chạy nhất (bộ đầy đủ ~30 GB)
+TOP_N_IMAGES: int = 5_000
 IMAGE_SIZE: tuple = (400, 400)
-PEXELS_API_KEY: str = os.getenv("PEXELS_API_KEY", "")
 
 # ---------------------------------------------------------
 # THAM SỐ PHÂN CỤM (CLUSTERING)
@@ -95,6 +111,8 @@ PEXELS_API_KEY: str = os.getenv("PEXELS_API_KEY", "")
 CLUSTER_K: int = 4
 K_EVAL_RANGE: range = range(2, 11)
 PCA_SAMPLE_SIZE: int = 2000
+# K-Means trên mẫu khách để thử K nhanh; sau đó gán cụm cho toàn bộ khách
+CLUSTER_FIT_SAMPLE: int = 200_000
 
 # ---------------------------------------------------------
 # THAM SỐ GỢI Ý (RECOMMENDER) & ĐÁNH GIÁ (EVALUATE)
